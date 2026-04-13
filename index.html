@@ -2,466 +2,504 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Nebula Flow — Interactive Particle System</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<title>Liquid Aurora</title>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
-  canvas { display: block; }
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #000;
+    overflow: hidden;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+  }
+  canvas { display: block; width: 100vw; height: 100vh; }
 
   #hud {
-    position: fixed;
-    top: 0; left: 0; right: 0;
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    padding: 20px 24px;
+    position: fixed; top: 0; left: 0; right: 0;
+    display: flex; justify-content: space-between; align-items: flex-start;
+    padding: 18px 20px;
     pointer-events: none;
-    z-index: 10;
   }
   #title {
     font-family: 'Courier New', monospace;
-    font-size: 13px;
-    letter-spacing: 0.2em;
-    color: rgba(255,255,255,0.55);
-    text-transform: uppercase;
+    font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: rgba(255,255,255,0.45);
   }
-  #title span {
-    display: block;
-    font-size: 20px;
-    font-weight: bold;
-    letter-spacing: 0.1em;
-    color: rgba(255,255,255,0.85);
-    margin-bottom: 2px;
+  #title b {
+    display: block; font-size: 17px; letter-spacing: 0.08em;
+    color: rgba(255,255,255,0.8); font-weight: 700; margin-bottom: 2px;
   }
-  #stats {
+  #fps-box {
     font-family: 'Courier New', monospace;
-    font-size: 11px;
-    color: rgba(255,255,255,0.35);
-    text-align: right;
-    line-height: 1.7;
-    letter-spacing: 0.05em;
+    font-size: 11px; color: rgba(255,255,255,0.3);
+    text-align: right; letter-spacing: 0.05em;
   }
+
   #hint {
-    position: fixed;
-    bottom: 22px;
-    left: 50%;
+    position: fixed; bottom: 22px; left: 50%;
     transform: translateX(-50%);
     font-family: 'Courier New', monospace;
-    font-size: 11px;
-    letter-spacing: 0.15em;
-    color: rgba(255,255,255,0.25);
-    pointer-events: none;
-    text-transform: uppercase;
-    white-space: nowrap;
+    font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: rgba(255,255,255,0.22);
+    pointer-events: none; white-space: nowrap;
+    transition: opacity 1s;
   }
+  #hint.fade { opacity: 0; }
+
+  /* Tap-to-cycle palette button — bottom-right, large for mobile */
+  #pal-btn {
+    position: fixed; bottom: 20px; right: 20px;
+    width: 52px; height: 52px; border-radius: 50%;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.18);
+    color: rgba(255,255,255,0.5);
+    font-family: 'Courier New', monospace;
+    font-size: 20px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    transition: background 0.2s;
+    touch-action: manipulation;
+  }
+  #pal-btn:active { background: rgba(255,255,255,0.18); }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 
 <div id="hud">
-  <div id="title">
-    <span>Nebula Flow</span>
-    Interactive Particle System
-  </div>
-  <div id="stats">
-    <div id="stat-particles">— particles</div>
-    <div id="stat-fps">— fps</div>
-    <div id="stat-mode">mode: flow</div>
-  </div>
+  <div id="title"><b>Liquid Aurora</b>WebGL Domain Warp Shader</div>
+  <div id="fps-box" id="fps">— fps</div>
 </div>
-
-<div id="hint">Move mouse to bend space · Click to explode · Space to cycle modes</div>
+<div id="hint">Touch to warp · Tap to pulse · ◐ to shift palette</div>
+<button id="pal-btn" aria-label="Cycle palette">◐</button>
 
 <script>
-// ─────────────────────────────────────────────────────────────
-//  Perlin Noise  (Ken Perlin's improved 2002 algorithm)
-// ─────────────────────────────────────────────────────────────
-const Noise = (() => {
-  const P = new Uint8Array(512);
-  const base = Array.from({length:256},(_,i)=>i);
-  // shuffle
-  for (let i=255;i>0;i--){
-    const j = (Math.random()*(i+1))|0;
-    [base[i],base[j]]=[base[j],base[i]];
-  }
-  for (let i=0;i<512;i++) P[i]=base[i&255];
+'use strict';
 
-  function fade(t){return t*t*t*(t*(t*6-15)+10);}
-  function lerp(a,b,t){return a+t*(b-a);}
-  function grad(h,x,y,z){
-    h&=15;
-    const u=h<8?x:y, v=h<4?y:h===12||h===14?x:z;
-    return ((h&1)?-u:u)+((h&2)?-v:v);
-  }
-
-  return {
-    noise(x,y,z=0){
-      const X=Math.floor(x)&255, Y=Math.floor(y)&255, Z=Math.floor(z)&255;
-      x-=Math.floor(x); y-=Math.floor(y); z-=Math.floor(z);
-      const u=fade(x), v=fade(y), w=fade(z);
-      const A=P[X]+Y, AA=P[A]+Z, AB=P[A+1]+Z;
-      const B=P[X+1]+Y, BA=P[B]+Z, BB=P[B+1]+Z;
-      return lerp(
-        lerp(lerp(grad(P[AA],x,y,z),   grad(P[BA],x-1,y,z),  u),
-             lerp(grad(P[AB],x,y-1,z), grad(P[BB],x-1,y-1,z),u), v),
-        lerp(lerp(grad(P[AA+1],x,y,z-1),  grad(P[BA+1],x-1,y,z-1),  u),
-             lerp(grad(P[AB+1],x,y-1,z-1),grad(P[BB+1],x-1,y-1,z-1),u), v), w);
-    },
-    // Fractal Brownian Motion
-    fbm(x,y,z,octaves=4,gain=0.5,lacunarity=2.0){
-      let val=0, amp=1, freq=1, max=0;
-      for(let i=0;i<octaves;i++){
-        val+=this.noise(x*freq,y*freq,z*freq)*amp;
-        max+=amp; amp*=gain; freq*=lacunarity;
-      }
-      return val/max;
-    }
-  };
-})();
-
-// ─────────────────────────────────────────────────────────────
-//  Setup
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  WebGL bootstrap
+// ─────────────────────────────────────────────────────────────────────────────
 const canvas = document.getElementById('c');
-const ctx    = canvas.getContext('2d');
-let W, H, DPR;
+const gl = canvas.getContext('webgl', { antialias: false, alpha: false })
+        || canvas.getContext('experimental-webgl', { antialias: false });
 
+if (!gl) {
+  document.body.innerHTML = '<p style="color:#fff;padding:40px;font-family:monospace">WebGL not supported on this device.</p>';
+  throw new Error('no webgl');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Shaders
+// ─────────────────────────────────────────────────────────────────────────────
+const VS = `
+attribute vec2 a_pos;
+void main(){ gl_Position = vec4(a_pos,0.0,1.0); }
+`;
+
+const FS = `
+precision highp float;
+
+uniform vec2  u_res;
+uniform float u_time;
+uniform int   u_nTouch;
+uniform vec2  u_tPos[8];
+uniform float u_tStr[8];
+uniform float u_pulse;
+uniform vec2  u_pulsePos;
+uniform float u_pulseAge;
+uniform int   u_palette;
+
+#define PI  3.14159265358979
+#define TAU 6.28318530718
+
+// ── Value noise ─────────────────────────────────────────────────────────────
+vec2 hash2(vec2 p){
+  p = vec2(dot(p,vec2(127.1,311.7)), dot(p,vec2(269.5,183.3)));
+  return -1.0 + 2.0*fract(sin(p)*43758.5453);
+}
+float noise(vec2 p){
+  vec2 i=floor(p), f=fract(p);
+  vec2 u=f*f*(3.0-2.0*f);
+  return mix(
+    mix(dot(hash2(i+vec2(0,0)),f-vec2(0,0)), dot(hash2(i+vec2(1,0)),f-vec2(1,0)),u.x),
+    mix(dot(hash2(i+vec2(0,1)),f-vec2(0,1)), dot(hash2(i+vec2(1,1)),f-vec2(1,1)),u.x),
+    u.y);
+}
+
+// ── Fractal Brownian Motion (loop-unrolled for GLSL ES compat) ───────────────
+float fbm4(vec2 p){
+  mat2 m = mat2(1.6,1.2,-1.2,1.6);
+  float v=0.0, a=0.5;
+  v+=a*noise(p); p=m*p; a*=0.5;
+  v+=a*noise(p); p=m*p; a*=0.5;
+  v+=a*noise(p); p=m*p; a*=0.5;
+  v+=a*noise(p);
+  return v;
+}
+float fbm6(vec2 p){
+  mat2 m = mat2(1.6,1.2,-1.2,1.6);
+  float v=0.0, a=0.5;
+  v+=a*noise(p); p=m*p; a*=0.5;
+  v+=a*noise(p); p=m*p; a*=0.5;
+  v+=a*noise(p); p=m*p; a*=0.5;
+  v+=a*noise(p); p=m*p; a*=0.5;
+  v+=a*noise(p); p=m*p; a*=0.5;
+  v+=a*noise(p);
+  return v;
+}
+
+// ── HSV → RGB ────────────────────────────────────────────────────────────────
+vec3 hsv(float h, float s, float v){
+  vec4 K=vec4(1.0,2.0/3.0,1.0/3.0,3.0);
+  vec3 p=abs(fract(vec3(h)+K.xyz)*6.0-K.www);
+  return v*mix(K.xxx,clamp(p-K.xxx,0.0,1.0),s);
+}
+
+// ── Palette definitions ──────────────────────────────────────────────────────
+// Each palette: (hue_base, hue_range, saturation, brightness_boost)
+// Returns a beautiful color given f in [-1,1] and time t
+vec3 palette(float f, float t){
+  float n = f*0.5+0.5; // remap to [0,1]
+
+  if(u_palette==0){
+    // Aurora: deep blue → electric green → violet
+    float h = 0.52 + n*0.22 + sin(t*0.08+n*PI)*0.05;
+    float s = 0.75 + n*0.25;
+    float v = 0.15 + 0.85*smoothstep(0.0,1.0,pow(n,0.7));
+    v += pow(max(0.0,n-0.6),2.0)*0.6; // bright highlights
+    return hsv(fract(h), clamp(s,0.0,1.0), clamp(v,0.0,1.2));
+  }
+  else if(u_palette==1){
+    // Neon Magma: deep red → orange → white-hot
+    float h = 0.0 + n*0.12 - t*0.01;
+    float s = 1.0 - n*0.45;
+    float v = 0.1 + 0.9*pow(n,0.6);
+    v += pow(max(0.0,n-0.7),2.0)*0.8;
+    return hsv(fract(h), clamp(s,0.0,1.0), clamp(v,0.0,1.3));
+  }
+  else if(u_palette==2){
+    // Cosmic: indigo → violet → gold
+    float h = 0.70 + n*0.18 + sin(t*0.06)*0.04;
+    float s = 0.85 - n*0.2;
+    float v = 0.1 + 0.9*smoothstep(0.0,1.0,n);
+    // Gold streaks
+    float gold = pow(max(0.0,fract(n*3.0+t*0.1)-0.7)/0.3, 2.0);
+    h = mix(h, 0.12, gold*0.4);
+    s = mix(s, 0.95, gold*0.5);
+    v += gold*0.5;
+    return hsv(fract(h), clamp(s,0.0,1.0), clamp(v,0.0,1.2));
+  }
+  else if(u_palette==3){
+    // Ocean Depths: near-black → deep teal → bioluminescent cyan
+    float h = 0.48 + n*0.10 + cos(t*0.07+n*TAU)*0.03;
+    float s = 0.9 - n*0.15;
+    float v = 0.0 + 0.95*pow(n,1.2);
+    float glow = pow(max(0.0,n-0.65),2.0)*1.2;
+    v += glow; s = mix(s, 0.6, glow*0.3);
+    return hsv(fract(h), clamp(s,0.0,1.0), clamp(v,0.0,1.3));
+  }
+  else {
+    // Solar Flare: black → amber → blinding white
+    float h = 0.08 - n*0.06 + t*0.005;
+    float s = 1.0 - pow(n,2.0)*0.8;
+    float v = pow(n,0.5)*1.1;
+    return hsv(fract(h), clamp(s,0.0,1.0), clamp(v,0.0,1.5));
+  }
+}
+
+void main(){
+  vec2 uv  = gl_FragCoord.xy / u_res;
+  float ar = u_res.x / u_res.y;
+  vec2  p  = (uv*2.0-1.0) * vec2(ar,1.0);
+  float t  = u_time * 0.25;
+
+  // ── Touch warp ────────────────────────────────────────────────────────────
+  for(int i=0; i<8; i++){
+    if(i >= u_nTouch) break;
+    vec2 tp = (u_tPos[i]*2.0-1.0)*vec2(ar,1.0);
+    vec2 d  = p - tp;
+    float r = length(d);
+    float str = u_tStr[i];
+    if(r < 2.0){
+      // Push outward
+      float push = str * 0.5 * exp(-r*r*1.5);
+      p += normalize(d+0.001) * push;
+      // Swirl (clockwise)
+      float swirl = str * 1.8 * exp(-r*r*3.0);
+      vec2 pd = p - tp;
+      float cs=cos(swirl), sn=sin(swirl);
+      p = tp + vec2(pd.x*cs - pd.y*sn, pd.x*sn + pd.y*cs);
+    }
+  }
+
+  // ── Pulse ring ────────────────────────────────────────────────────────────
+  if(u_pulse > 0.0){
+    vec2 pp  = (u_pulsePos*2.0-1.0)*vec2(ar,1.0);
+    float r  = length(p - pp);
+    float wf = u_pulseAge * 3.0;               // wave front radius
+    float ring = exp(-pow(r - wf, 2.0) * 14.0) * u_pulse;
+    p += normalize(p - pp + 0.001) * ring * 0.4;
+    // Secondary inward ring
+    float wf2 = max(0.0, u_pulseAge*3.0 - 0.4);
+    float ring2 = exp(-pow(r - wf2, 2.0)*18.0) * u_pulse * 0.5;
+    p -= normalize(p - pp + 0.001) * ring2 * 0.2;
+  }
+
+  // ── 3-level domain warping ────────────────────────────────────────────────
+  // Level 1
+  vec2 q = vec2(
+    fbm4(p + vec2(0.00, 0.00) + t*0.4),
+    fbm4(p + vec2(5.20, 1.30) + t*0.37)
+  );
+
+  // Level 2
+  vec2 r2 = vec2(
+    fbm4(p + 4.0*q + vec2(1.70, 9.20) + t*0.17),
+    fbm4(p + 4.0*q + vec2(8.30, 2.80) + t*0.14)
+  );
+
+  // Level 3 (final sample)
+  float f = fbm6(p + 3.5*r2 + t*0.05);
+
+  // ── Shimmer layer ─────────────────────────────────────────────────────────
+  float shimmer = fbm4(p*3.0 + vec2(0.0,t*0.6)) * 0.12;
+  f = f + shimmer;
+
+  // ── Color ─────────────────────────────────────────────────────────────────
+  vec3 col = palette(f, u_time);
+
+  // ── Vignette ──────────────────────────────────────────────────────────────
+  float vig = 1.0 - 0.35*pow(length(uv - 0.5)*2.0, 2.2);
+  col *= vig;
+
+  gl_FragColor = vec4(clamp(col,0.0,1.0), 1.0);
+}
+`;
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Compile & link
+// ─────────────────────────────────────────────────────────────────────────────
+function compileShader(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if(!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+
+const prog = gl.createProgram();
+gl.attachShader(prog, compileShader(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, compileShader(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+if(!gl.getProgramParameter(prog, gl.LINK_STATUS))
+  throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+// Fullscreen quad
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,1,1]), gl.STATIC_DRAW);
+const posLoc = gl.getAttribLocation(prog, 'a_pos');
+gl.enableVertexAttribArray(posLoc);
+gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+// Uniform locations
+const U = {};
+['u_res','u_time','u_nTouch','u_pulse','u_pulsePos','u_pulseAge','u_palette'].forEach(
+  n => U[n] = gl.getUniformLocation(prog, n)
+);
+const U_tPos = Array.from({length:8}, (_,i) => gl.getUniformLocation(prog,`u_tPos[${i}]`));
+const U_tStr = Array.from({length:8}, (_,i) => gl.getUniformLocation(prog,`u_tStr[${i}]`));
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Resize
+// ─────────────────────────────────────────────────────────────────────────────
+let W, H;
 function resize(){
-  DPR = Math.min(window.devicePixelRatio||1, 2);
-  W   = window.innerWidth;
-  H   = window.innerHeight;
-  canvas.width  = W * DPR;
-  canvas.height = H * DPR;
-  canvas.style.width  = W + 'px';
-  canvas.style.height = H + 'px';
-  ctx.scale(DPR, DPR);
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = Math.round(window.innerWidth  * dpr);
+  H = Math.round(window.innerHeight * dpr);
+  canvas.width  = W;
+  canvas.height = H;
+  gl.viewport(0, 0, W, H);
 }
 resize();
 window.addEventListener('resize', resize);
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 //  State
-// ─────────────────────────────────────────────────────────────
-const MODES = ['flow','vortex','repulse','attract'];
-let modeIdx  = 0;
-let t        = 0;           // time
-let exploding = false;
-let explodeX = W/2, explodeY = H/2;
-let explodeT = 0;
+// ─────────────────────────────────────────────────────────────────────────────
+let palette = 0;
+const N_PAL  = 5;
 
-const mouse = { x: -9999, y: -9999, px: -9999, py: -9999 };
+// Active touch/mouse points: {x, y, str} where str fades over time
+const touches = new Map(); // id → {x,y,str,lastT}
 
-// ─────────────────────────────────────────────────────────────
-//  Color palettes
-// ─────────────────────────────────────────────────────────────
-const PALETTES = [
-  // [h_base, h_range, s, l]  — cycle shifts over time
-  { name:'nebula',   fn: (v,speed) => `hsl(${240 + v*120 + t*20},100%,${55+v*30}%)` },
-  { name:'aurora',   fn: (v,speed) => `hsl(${140 + v*80  + t*15},90%, ${50+v*25}%)` },
-  { name:'inferno',  fn: (v,speed) => `hsl(${  0 + v*60  + t*25},100%,${45+v*40}%)` },
-  { name:'cosmic',   fn: (v,speed) => `hsl(${280 + v*160 + t*18},90%, ${55+v*35}%)` },
-];
-let paletteIdx = 0;
+let pulse      = 0;        // current pulse intensity [0,1]
+let pulsePos   = [0.5, 0.5];
+let pulseAge   = 0;
+let pulsing    = false;
 
-// ─────────────────────────────────────────────────────────────
-//  Particle
-// ─────────────────────────────────────────────────────────────
-const FLOW_SCALE  = 0.0018;
-const FLOW_SPEED  = 4.0;
-const MAX_SPEED   = 6.0;
-const FRICTION    = 0.92;
-const TRAIL_LEN   = 0;   // we use canvas fade instead
+let startTime  = performance.now();
+let lastFrame  = 0;
+let fps        = 60;
+let frames     = 0;
+let fpsTimer   = 0;
+let interacted = false;
 
-class Particle {
-  constructor(i, total){
-    this.id = i;
-    this._total = total;
-    this.reset(true);
-  }
+const fpsEl  = document.getElementById('fps-box');
+const hintEl = document.getElementById('hint');
 
-  reset(init=false){
-    if(init){
-      this.x  = Math.random() * W;
-      this.y  = Math.random() * H;
-    } else {
-      // respawn at random edge or center
-      const side = Math.random();
-      if(side < 0.6){
-        this.x = Math.random() * W;
-        this.y = Math.random() * H;
-      } else if(side < 0.7){
-        this.x = 0;             this.y = Math.random()*H;
-      } else if(side < 0.8){
-        this.x = W;             this.y = Math.random()*H;
-      } else if(side < 0.9){
-        this.x = Math.random()*W; this.y = 0;
-      } else {
-        this.x = Math.random()*W; this.y = H;
-      }
-    }
-    this.vx   = (Math.random()-0.5)*2;
-    this.vy   = (Math.random()-0.5)*2;
-    this.life = Math.random();                     // [0,1)
-    this.maxLife = 0.4 + Math.random()*0.6;
-    this.size = 0.4 + Math.random()*1.8;
-    this.baseHue  = Math.random()*360;
-  }
+// ─────────────────────────────────────────────────────────────────────────────
+//  Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+function clientToUV(x, y){
+  return [x / window.innerWidth, 1 - y / window.innerHeight];
+}
 
-  update(){
-    const mode = MODES[modeIdx];
+function firePulse(x, y){
+  pulsePos = clientToUV(x, y);
+  pulseAge  = 0;
+  pulse     = 1.0;
+  pulsing   = true;
+}
 
-    // ── Flow field ──────────────────────────────────────────
-    const nx = this.x * FLOW_SCALE;
-    const ny = this.y * FLOW_SCALE;
-    const nz = t * 0.25;
-
-    const angle  = Noise.fbm(nx, ny, nz, 3) * Math.PI * 4;
-    const curl_x = Noise.fbm(nx+100, ny, nz, 2) * Math.PI * 4;
-    const mag    = 0.6 + 0.4 * (Noise.noise(nx*0.5, ny*0.5, nz*0.3)+1)*0.5;
-
-    const fx = Math.cos(angle) * FLOW_SPEED * mag;
-    const fy = Math.sin(angle) * FLOW_SPEED * mag;
-
-    this.vx += fx * 0.12;
-    this.vy += fy * 0.12;
-
-    // ── Mouse force ─────────────────────────────────────────
-    const dx   = this.x - mouse.x;
-    const dy   = this.y - mouse.y;
-    const dist2 = dx*dx + dy*dy;
-    const R    = 180;
-
-    if(dist2 < R*R && mouse.x > -100){
-      const dist = Math.sqrt(dist2) || 0.001;
-      const norm = (R - dist) / R;          // 0..1 (stronger when close)
-      const strength = norm * norm * 10;
-
-      if(mode === 'flow'){
-        // Deflect tangentially — creates beautiful swirl around cursor
-        const tang = Math.atan2(dy, dx) + Math.PI/2;
-        this.vx += Math.cos(tang) * strength * 0.5;
-        this.vy += Math.sin(tang) * strength * 0.5;
-      } else if(mode === 'repulse'){
-        this.vx += (dx/dist) * strength;
-        this.vy += (dy/dist) * strength;
-      } else if(mode === 'attract'){
-        this.vx -= (dx/dist) * strength;
-        this.vy -= (dy/dist) * strength;
-      } else if(mode === 'vortex'){
-        const angle2 = Math.atan2(dy,dx) + Math.PI*0.5 + norm*Math.PI;
-        this.vx += Math.cos(angle2)*strength*0.7;
-        this.vy += Math.sin(angle2)*strength*0.7;
-      }
-    }
-
-    // ── Explosion ───────────────────────────────────────────
-    if(exploding){
-      const ex = this.x - explodeX;
-      const ey = this.y - explodeY;
-      const ed = Math.sqrt(ex*ex+ey*ey)||0.001;
-      const wave = Math.max(0, 1 - Math.abs(ed - explodeT*300)/120);
-      if(wave > 0){
-        const s = wave * 25;
-        this.vx += (ex/ed)*s;
-        this.vy += (ey/ed)*s;
-      }
-    }
-
-    // ── Friction & clamp ────────────────────────────────────
-    this.vx *= FRICTION;
-    this.vy *= FRICTION;
-    const spd = Math.sqrt(this.vx*this.vx+this.vy*this.vy);
-    if(spd > MAX_SPEED){
-      this.vx = (this.vx/spd)*MAX_SPEED;
-      this.vy = (this.vy/spd)*MAX_SPEED;
-    }
-
-    this.x += this.vx;
-    this.y += this.vy;
-    this.life += 0.003 + spd*0.0004;
-
-    // ── Respawn ─────────────────────────────────────────────
-    if(this.life > this.maxLife
-       || this.x < -50 || this.x > W+50
-       || this.y < -50 || this.y > H+50){
-      this.reset();
-    }
-  }
-
-  draw(){
-    const spd   = Math.sqrt(this.vx*this.vx + this.vy*this.vy);
-    const spdN  = Math.min(spd / MAX_SPEED, 1);          // 0..1
-    const phase = this.life / this.maxLife;               // 0..1
-    const alpha = Math.sin(phase * Math.PI) * (0.4 + spdN*0.55);
-    const sz    = this.size * (0.5 + spdN*0.8);
-
-    // Color from active palette
-    const colorVal = (spdN + Noise.noise(this.x*0.003, this.y*0.003, t*0.1) * 0.5 + 0.5);
-    const colorStr = PALETTES[paletteIdx].fn(Math.min(colorVal,1), spd);
-
-    // Glow (larger, dimmer circle)
-    ctx.beginPath();
-    ctx.arc(this.x, this.y, sz * 3, 0, Math.PI*2);
-    ctx.fillStyle = colorStr.replace('hsl','hsla').replace(')',`,${alpha*0.08})`);
-    ctx.fill();
-
-    // Core
-    ctx.beginPath();
-    ctx.arc(this.x, this.y, sz, 0, Math.PI*2);
-    ctx.fillStyle = colorStr.replace('hsl','hsla').replace(')',`,${alpha})`);
-    ctx.fill();
+function maybeHideHint(){
+  if(!interacted){
+    interacted = true;
+    hintEl.classList.add('fade');
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-//  Init particles
-// ─────────────────────────────────────────────────────────────
-const N = Math.min(6000, Math.floor(W * H / 250));
-const particles = Array.from({length: N}, (_, i) => new Particle(i, N));
+// ─────────────────────────────────────────────────────────────────────────────
+//  Input: Mouse
+// ─────────────────────────────────────────────────────────────────────────────
+let mouseDown = false;
 
-// ─────────────────────────────────────────────────────────────
-//  Background grid (drawn once, subtle)
-// ─────────────────────────────────────────────────────────────
-function drawGrid(){
-  const step = 80;
-  ctx.strokeStyle = 'rgba(255,255,255,0.022)';
-  ctx.lineWidth   = 0.5;
-  for(let x=0; x<W; x+=step){
-    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke();
+window.addEventListener('mousedown', e => {
+  maybeHideHint();
+  mouseDown = true;
+  const uv = clientToUV(e.clientX, e.clientY);
+  touches.set('mouse', { x: uv[0], y: uv[1], str: 1.0, lastT: performance.now() });
+  firePulse(e.clientX, e.clientY);
+});
+window.addEventListener('mousemove', e => {
+  if(!mouseDown) return;
+  const uv = clientToUV(e.clientX, e.clientY);
+  const entry = touches.get('mouse');
+  if(entry){ entry.x = uv[0]; entry.y = uv[1]; entry.str = 1.0; entry.lastT = performance.now(); }
+});
+window.addEventListener('mouseup',    () => { mouseDown = false; touches.delete('mouse'); });
+window.addEventListener('mouseleave', () => { mouseDown = false; touches.delete('mouse'); });
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Input: Touch
+// ─────────────────────────────────────────────────────────────────────────────
+function handleTouchStart(e){
+  e.preventDefault();
+  maybeHideHint();
+  for(const t of e.changedTouches){
+    const uv = clientToUV(t.clientX, t.clientY);
+    touches.set(t.identifier, { x: uv[0], y: uv[1], str: 1.0, lastT: performance.now() });
   }
-  for(let y=0; y<H; y+=step){
-    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke();
+  // Fire pulse on first touch of a gesture
+  if(e.changedTouches.length > 0){
+    const t = e.changedTouches[0];
+    firePulse(t.clientX, t.clientY);
   }
 }
-
-// ─────────────────────────────────────────────────────────────
-//  Cursor glow
-// ─────────────────────────────────────────────────────────────
-function drawCursor(){
-  if(mouse.x < 0) return;
-  const r = 180;
-  const grd = ctx.createRadialGradient(mouse.x,mouse.y,0, mouse.x,mouse.y,r);
-  const h = (t*30)%360;
-  grd.addColorStop(0,   `hsla(${h},100%,80%,0.08)`);
-  grd.addColorStop(0.3, `hsla(${h+40},90%,70%,0.04)`);
-  grd.addColorStop(1,   `hsla(${h+80},80%,60%,0)`);
-  ctx.beginPath();
-  ctx.arc(mouse.x,mouse.y,r,0,Math.PI*2);
-  ctx.fillStyle = grd;
-  ctx.fill();
-
-  // Small crosshair dot
-  ctx.beginPath();
-  ctx.arc(mouse.x,mouse.y,2.5,0,Math.PI*2);
-  ctx.fillStyle = `hsla(${h},100%,90%,0.6)`;
-  ctx.fill();
+function handleTouchMove(e){
+  e.preventDefault();
+  for(const t of e.changedTouches){
+    const entry = touches.get(t.identifier);
+    if(entry){
+      const uv = clientToUV(t.clientX, t.clientY);
+      entry.x = uv[0]; entry.y = uv[1]; entry.str = 1.0; entry.lastT = performance.now();
+    }
+  }
+}
+function handleTouchEnd(e){
+  e.preventDefault();
+  for(const t of e.changedTouches) touches.delete(t.identifier);
 }
 
-// ─────────────────────────────────────────────────────────────
-//  FPS counter
-// ─────────────────────────────────────────────────────────────
-let fps=60, lastTime=0, frames=0, fpsTimer=0;
+canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+canvas.addEventListener('touchmove',  handleTouchMove,  { passive: false });
+canvas.addEventListener('touchend',   handleTouchEnd,   { passive: false });
+canvas.addEventListener('touchcancel',handleTouchEnd,   { passive: false });
 
-// ─────────────────────────────────────────────────────────────
-//  Main loop
-// ─────────────────────────────────────────────────────────────
-function animate(now=0){
-  const dt = now - lastTime; lastTime = now;
+// ───────────────────────────────────────────────────────────────────────
+//  Palette button
+// ─────────────────────────────────────────────────────────────────────────────
+document.getElementById('pal-btn').addEventListene').addEventListener('click', e => {
+  e.stopPropagation();
+  palette = (palette + 1) % N_PAL;
+  maybeHideHint();
+});
+document.getElementById('pal-btn').addEventListener('touchend', e => {
+  e.preventDefault(); e.stopPropagation();
+  palette = (palette + 1) % N_PAL;
+  maybeHideHint();
+}, { passive: false });
+
+// Keyboard
+window.addEventListener('keydown', e => {
+  if(e.code === 'KeyP') palette = (palette+1) % N_PAL;
+  if(e.code === 'Space'){ e.preventDefault(); firePulse(window.innerWidth/2, window.innerHeight/2); }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Render loop
+// ─────────────────────────────────────────────────────────────────────────────
+function animate(now){
+  const dt = Math.min(now - lastFrame, 100);
+  lastFrame = now;
   fpsTimer += dt; frames++;
-  if(fpsTimer > 500){ fps = Math.round(frames/(fpsTimer/1000)); frames=0; fpsTimer=0; }
+  if(fpsTimer > 600){ fps = Math.round(frames/(fpsTimer/1000)); frames=0; fpsTimer=0; fpsEl.textContent = fps+' fps'; }
 
-  // ── Fade background ──────────────────────────────────────
-  ctx.globalCompositeOperation = 'source-over';
-  ctx.fillStyle = 'rgba(0,3,10,0.18)';
-  ctx.fillRect(0,0,W,H);
+  const t = (now - startTime) / 1000;
 
-  drawGrid();
-
-  // ── Additive blending for glow ───────────────────────────
-  ctx.globalCompositeOperation = 'lighter';
-
-  particles.forEach(p => { p.update(); p.draw(); });
-
-  drawCursor();
-
-  ctx.globalCompositeOperation = 'source-over';
-
-  // ── Explosion ring ───────────────────────────────────────
-  if(exploding){
-    explodeT += dt/1000;
-    const radius = explodeT * 300;
-    const ring   = Math.max(0, 1 - explodeT/0.6);
-    if(ring > 0){
-      ctx.beginPath();
-      ctx.arc(explodeX, explodeY, radius, 0, Math.PI*2);
-      ctx.strokeStyle = `rgba(255,200,120,${ring*0.5})`;
-      ctx.lineWidth = 2 * ring;
-      ctx.stroke();
-    } else {
-      exploding = false;
-    }
+  // Fade out old touches
+  for(const [id, entry] of touches){
+    const age = (now - entry.lastT) / 1000;
+    entry.str = Math.max(0, 1 - age * 2.5);
+    if(entry.str <= 0 && id !== 'mouse' && !mouseDown) touches.delete(id);
   }
 
-  // ── HUD ──────────────────────────────────────────────────
-  document.getElementById('stat-particles').textContent = N.toLocaleString() + ' particles';
-  document.getElementById('stat-fps').textContent       = fps + ' fps';
-  document.getElementById('stat-mode').textContent      = 'mode: ' + MODES[modeIdx];
+  // Pulse decay
+  if(pulsing){
+    pulseAge += dt / 1000;
+    pulse    = Math.max(0, 1 - pulseAge / 0.8);
+    if(pulse <= 0) pulsing = false;
+  }
 
-  t += 0.004;
+  // Upload uniforms
+  gl.uniform2f(U.u_res, W, H);
+  gl.uniform1f(U.u_time, t);
+  gl.uniform1i(U.u_palette, palette);
+
+  const tArr = [...touches.values()].slice(0, 8);
+  gl.uniform1i(U.u_nTouch, tArr.length);
+  for(let i=0; i<8; i++){
+    const e = tArr[i];
+    gl.uniform2f(U_tPos[i], e ? e.x : 0, e ? e.y : 0);
+    gl.uniform1f(U_tStr[i], e ? e.str : 0);
+  }
+
+  gl.uniform1f(U.u_pulse,    pulsing ? pulse : 0);
+  gl.uniform2f(U.u_pulsePos, pulsePos[0], pulsePos[1]);
+  gl.uniform1f(U.u_pulseAge, pulseAge);
+
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   requestAnimationFrame(animate);
 }
 
-animate();
-
-// ─────────────────────────────────────────────────────────────
-//  Input
-// ─────────────────────────────────────────────────────────────
-window.addEventListener('mousemove', e => {
-  mouse.px = mouse.x; mouse.py = mouse.y;
-  mouse.x  = e.clientX;
-  mouse.y  = e.clientY;
-});
-
-window.addEventListener('mouseleave', () => { mouse.x = -9999; mouse.y = -9999; });
-
-window.addEventListener('click', e => {
-  exploding = true;
-  explodeX  = e.clientX;
-  explodeY  = e.clientY;
-  explodeT  = 0;
-});
-
-window.addEventListener('keydown', e => {
-  if(e.code === 'Space'){
-    e.preventDefault();
-    modeIdx = (modeIdx+1) % MODES.length;
-  }
-  if(e.code === 'KeyP'){
-    paletteIdx = (paletteIdx+1) % PALETTES.length;
-  }
-  if(e.code === 'KeyR'){
-    particles.forEach(p => p.reset(true));
-  }
-});
-
-// Touch support
-window.addEventListener('touchmove', e => {
-  e.preventDefault();
-  mouse.x = e.touches[0].clientX;
-  mouse.y = e.touches[0].clientY;
-}, { passive: false });
-
-window.addEventListener('touchstart', e => {
-  const touch = e.touches[0];
-  exploding = true;
-  explodeX  = touch.clientX;
-  explodeY  = touch.clientY;
-  explodeT  = 0;
-});
-
-window.addEventListener('touchend', () => { mouse.x = -9999; mouse.y = -9999; });
+requestAnimationFrame(animate);
 </script>
 </body>
 </html>
