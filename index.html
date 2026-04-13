@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nebula Flow — Interactive Particle System</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; }
+
+  #hud {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding: 20px 24px;
+    pointer-events: none;
+    z-index: 10;
+  }
+  #title {
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    letter-spacing: 0.2em;
+    color: rgba(255,255,255,0.55);
+    text-transform: uppercase;
+  }
+  #title span {
+    display: block;
+    font-size: 20px;
+    font-weight: bold;
+    letter-spacing: 0.1em;
+    color: rgba(255,255,255,0.85);
+    margin-bottom: 2px;
+  }
+  #stats {
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    color: rgba(255,255,255,0.35);
+    text-align: right;
+    line-height: 1.7;
+    letter-spacing: 0.05em;
+  }
+  #hint {
+    position: fixed;
+    bottom: 22px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    color: rgba(255,255,255,0.25);
+    pointer-events: none;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="hud">
+  <div id="title">
+    <span>Nebula Flow</span>
+    Interactive Particle System
+  </div>
+  <div id="stats">
+    <div id="stat-particles">— particles</div>
+    <div id="stat-fps">— fps</div>
+    <div id="stat-mode">mode: flow</div>
+  </div>
+</div>
+
+<div id="hint">Move mouse to bend space · Click to explode · Space to cycle modes</div>
+
+<script>
+// ─────────────────────────────────────────────────────────────
+//  Perlin Noise  (Ken Perlin's improved 2002 algorithm)
+// ─────────────────────────────────────────────────────────────
+const Noise = (() => {
+  const P = new Uint8Array(512);
+  const base = Array.from({length:256},(_,i)=>i);
+  // shuffle
+  for (let i=255;i>0;i--){
+    const j = (Math.random()*(i+1))|0;
+    [base[i],base[j]]=[base[j],base[i]];
+  }
+  for (let i=0;i<512;i++) P[i]=base[i&255];
+
+  function fade(t){return t*t*t*(t*(t*6-15)+10);}
+  function lerp(a,b,t){return a+t*(b-a);}
+  function grad(h,x,y,z){
+    h&=15;
+    const u=h<8?x:y, v=h<4?y:h===12||h===14?x:z;
+    return ((h&1)?-u:u)+((h&2)?-v:v);
+  }
+
+  return {
+    noise(x,y,z=0){
+      const X=Math.floor(x)&255, Y=Math.floor(y)&255, Z=Math.floor(z)&255;
+      x-=Math.floor(x); y-=Math.floor(y); z-=Math.floor(z);
+      const u=fade(x), v=fade(y), w=fade(z);
+      const A=P[X]+Y, AA=P[A]+Z, AB=P[A+1]+Z;
+      const B=P[X+1]+Y, BA=P[B]+Z, BB=P[B+1]+Z;
+      return lerp(
+        lerp(lerp(grad(P[AA],x,y,z),   grad(P[BA],x-1,y,z),  u),
+             lerp(grad(P[AB],x,y-1,z), grad(P[BB],x-1,y-1,z),u), v),
+        lerp(lerp(grad(P[AA+1],x,y,z-1),  grad(P[BA+1],x-1,y,z-1),  u),
+             lerp(grad(P[AB+1],x,y-1,z-1),grad(P[BB+1],x-1,y-1,z-1),u), v), w);
+    },
+    // Fractal Brownian Motion
+    fbm(x,y,z,octaves=4,gain=0.5,lacunarity=2.0){
+      let val=0, amp=1, freq=1, max=0;
+      for(let i=0;i<octaves;i++){
+        val+=this.noise(x*freq,y*freq,z*freq)*amp;
+        max+=amp; amp*=gain; freq*=lacunarity;
+      }
+      return val/max;
+    }
+  };
+})();
+
+// ─────────────────────────────────────────────────────────────
+//  Setup
+// ─────────────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+let W, H, DPR;
+
+function resize(){
+  DPR = Math.min(window.devicePixelRatio||1, 2);
+  W   = window.innerWidth;
+  H   = window.innerHeight;
+  canvas.width  = W * DPR;
+  canvas.height = H * DPR;
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.scale(DPR, DPR);
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ─────────────────────────────────────────────────────────────
+//  State
+// ─────────────────────────────────────────────────────────────
+const MODES = ['flow','vortex','repulse','attract'];
+let modeIdx  = 0;
+let t        = 0;           // time
+let exploding = false;
+let explodeX = W/2, explodeY = H/2;
+let explodeT = 0;
+
+const mouse = { x: -9999, y: -9999, px: -9999, py: -9999 };
+
+// ─────────────────────────────────────────────────────────────
+//  Color palettes
+// ─────────────────────────────────────────────────────────────
+const PALETTES = [
+  // [h_base, h_range, s, l]  — cycle shifts over time
+  { name:'nebula',   fn: (v,speed) => `hsl(${240 + v*120 + t*20},100%,${55+v*30}%)` },
+  { name:'aurora',   fn: (v,speed) => `hsl(${140 + v*80  + t*15},90%, ${50+v*25}%)` },
+  { name:'inferno',  fn: (v,speed) => `hsl(${  0 + v*60  + t*25},100%,${45+v*40}%)` },
+  { name:'cosmic',   fn: (v,speed) => `hsl(${280 + v*160 + t*18},90%, ${55+v*35}%)` },
+];
+let paletteIdx = 0;
+
+// ─────────────────────────────────────────────────────────────
+//  Particle
+// ─────────────────────────────────────────────────────────────
+const FLOW_SCALE  = 0.0018;
+const FLOW_SPEED  = 4.0;
+const MAX_SPEED   = 6.0;
+const FRICTION    = 0.92;
+const TRAIL_LEN   = 0;   // we use canvas fade instead
+
+class Particle {
+  constructor(i, total){
+    this.id = i;
+    this._total = total;
+    this.reset(true);
+  }
+
+  reset(init=false){
+    if(init){
+      this.x  = Math.random() * W;
+      this.y  = Math.random() * H;
+    } else {
+      // respawn at random edge or center
+      const side = Math.random();
+      if(side < 0.6){
+        this.x = Math.random() * W;
+        this.y = Math.random() * H;
+      } else if(side < 0.7){
+        this.x = 0;             this.y = Math.random()*H;
+      } else if(side < 0.8){
+        this.x = W;             this.y = Math.random()*H;
+      } else if(side < 0.9){
+        this.x = Math.random()*W; this.y = 0;
+      } else {
+        this.x = Math.random()*W; this.y = H;
+      }
+    }
+    this.vx   = (Math.random()-0.5)*2;
+    this.vy   = (Math.random()-0.5)*2;
+    this.life = Math.random();                     // [0,1)
+    this.maxLife = 0.4 + Math.random()*0.6;
+    this.size = 0.4 + Math.random()*1.8;
+    this.baseHue  = Math.random()*360;
+  }
+
+  update(){
+    const mode = MODES[modeIdx];
+
+    // ── Flow field ──────────────────────────────────────────
+    const nx = this.x * FLOW_SCALE;
+    const ny = this.y * FLOW_SCALE;
+    const nz = t * 0.25;
+
+    const angle  = Noise.fbm(nx, ny, nz, 3) * Math.PI * 4;
+    const curl_x = Noise.fbm(nx+100, ny, nz, 2) * Math.PI * 4;
+    const mag    = 0.6 + 0.4 * (Noise.noise(nx*0.5, ny*0.5, nz*0.3)+1)*0.5;
+
+    const fx = Math.cos(angle) * FLOW_SPEED * mag;
+    const fy = Math.sin(angle) * FLOW_SPEED * mag;
+
+    this.vx += fx * 0.12;
+    this.vy += fy * 0.12;
+
+    // ── Mouse force ─────────────────────────────────────────
+    const dx   = this.x - mouse.x;
+    const dy   = this.y - mouse.y;
+    const dist2 = dx*dx + dy*dy;
+    const R    = 180;
+
+    if(dist2 < R*R && mouse.x > -100){
+      const dist = Math.sqrt(dist2) || 0.001;
+      const norm = (R - dist) / R;          // 0..1 (stronger when close)
+      const strength = norm * norm * 10;
+
+      if(mode === 'flow'){
+        // Deflect tangentially — creates beautiful swirl around cursor
+        const tang = Math.atan2(dy, dx) + Math.PI/2;
+        this.vx += Math.cos(tang) * strength * 0.5;
+        this.vy += Math.sin(tang) * strength * 0.5;
+      } else if(mode === 'repulse'){
+        this.vx += (dx/dist) * strength;
+        this.vy += (dy/dist) * strength;
+      } else if(mode === 'attract'){
+        this.vx -= (dx/dist) * strength;
+        this.vy -= (dy/dist) * strength;
+      } else if(mode === 'vortex'){
+        const angle2 = Math.atan2(dy,dx) + Math.PI*0.5 + norm*Math.PI;
+        this.vx += Math.cos(angle2)*strength*0.7;
+        this.vy += Math.sin(angle2)*strength*0.7;
+      }
+    }
+
+    // ── Explosion ───────────────────────────────────────────
+    if(exploding){
+      const ex = this.x - explodeX;
+      const ey = this.y - explodeY;
+      const ed = Math.sqrt(ex*ex+ey*ey)||0.001;
+      const wave = Math.max(0, 1 - Math.abs(ed - explodeT*300)/120);
+      if(wave > 0){
+        const s = wave * 25;
+        this.vx += (ex/ed)*s;
+        this.vy += (ey/ed)*s;
+      }
+    }
+
+    // ── Friction & clamp ────────────────────────────────────
+    this.vx *= FRICTION;
+    this.vy *= FRICTION;
+    const spd = Math.sqrt(this.vx*this.vx+this.vy*this.vy);
+    if(spd > MAX_SPEED){
+      this.vx = (this.vx/spd)*MAX_SPEED;
+      this.vy = (this.vy/spd)*MAX_SPEED;
+    }
+
+    this.x += this.vx;
+    this.y += this.vy;
+    this.life += 0.003 + spd*0.0004;
+
+    // ── Respawn ─────────────────────────────────────────────
+    if(this.life > this.maxLife
+       || this.x < -50 || this.x > W+50
+       || this.y < -50 || this.y > H+50){
+      this.reset();
+    }
+  }
+
+  draw(){
+    const spd   = Math.sqrt(this.vx*this.vx + this.vy*this.vy);
+    const spdN  = Math.min(spd / MAX_SPEED, 1);          // 0..1
+    const phase = this.life / this.maxLife;               // 0..1
+    const alpha = Math.sin(phase * Math.PI) * (0.4 + spdN*0.55);
+    const sz    = this.size * (0.5 + spdN*0.8);
+
+    // Color from active palette
+    const colorVal = (spdN + Noise.noise(this.x*0.003, this.y*0.003, t*0.1) * 0.5 + 0.5);
+    const colorStr = PALETTES[paletteIdx].fn(Math.min(colorVal,1), spd);
+
+    // Glow (larger, dimmer circle)
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, sz * 3, 0, Math.PI*2);
+    ctx.fillStyle = colorStr.replace('hsl','hsla').replace(')',`,${alpha*0.08})`);
+    ctx.fill();
+
+    // Core
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, sz, 0, Math.PI*2);
+    ctx.fillStyle = colorStr.replace('hsl','hsla').replace(')',`,${alpha})`);
+    ctx.fill();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Init particles
+// ─────────────────────────────────────────────────────────────
+const N = Math.min(6000, Math.floor(W * H / 250));
+const particles = Array.from({length: N}, (_, i) => new Particle(i, N));
+
+// ─────────────────────────────────────────────────────────────
+//  Background grid (drawn once, subtle)
+// ─────────────────────────────────────────────────────────────
+function drawGrid(){
+  const step = 80;
+  ctx.strokeStyle = 'rgba(255,255,255,0.022)';
+  ctx.lineWidth   = 0.5;
+  for(let x=0; x<W; x+=step){
+    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke();
+  }
+  for(let y=0; y<H; y+=step){
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+//  Cursor glow
+// ─────────────────────────────────────────────────────────────
+function drawCursor(){
+  if(mouse.x < 0) return;
+  const r = 180;
+  const grd = ctx.createRadialGradient(mouse.x,mouse.y,0, mouse.x,mouse.y,r);
+  const h = (t*30)%360;
+  grd.addColorStop(0,   `hsla(${h},100%,80%,0.08)`);
+  grd.addColorStop(0.3, `hsla(${h+40},90%,70%,0.04)`);
+  grd.addColorStop(1,   `hsla(${h+80},80%,60%,0)`);
+  ctx.beginPath();
+  ctx.arc(mouse.x,mouse.y,r,0,Math.PI*2);
+  ctx.fillStyle = grd;
+  ctx.fill();
+
+  // Small crosshair dot
+  ctx.beginPath();
+  ctx.arc(mouse.x,mouse.y,2.5,0,Math.PI*2);
+  ctx.fillStyle = `hsla(${h},100%,90%,0.6)`;
+  ctx.fill();
+}
+
+// ─────────────────────────────────────────────────────────────
+//  FPS counter
+// ─────────────────────────────────────────────────────────────
+let fps=60, lastTime=0, frames=0, fpsTimer=0;
+
+// ─────────────────────────────────────────────────────────────
+//  Main loop
+// ─────────────────────────────────────────────────────────────
+function animate(now=0){
+  const dt = now - lastTime; lastTime = now;
+  fpsTimer += dt; frames++;
+  if(fpsTimer > 500){ fps = Math.round(frames/(fpsTimer/1000)); frames=0; fpsTimer=0; }
+
+  // ── Fade background ──────────────────────────────────────
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = 'rgba(0,3,10,0.18)';
+  ctx.fillRect(0,0,W,H);
+
+  drawGrid();
+
+  // ── Additive blending for glow ───────────────────────────
+  ctx.globalCompositeOperation = 'lighter';
+
+  particles.forEach(p => { p.update(); p.draw(); });
+
+  drawCursor();
+
+  ctx.globalCompositeOperation = 'source-over';
+
+  // ── Explosion ring ───────────────────────────────────────
+  if(exploding){
+    explodeT += dt/1000;
+    const radius = explodeT * 300;
+    const ring   = Math.max(0, 1 - explodeT/0.6);
+    if(ring > 0){
+      ctx.beginPath();
+      ctx.arc(explodeX, explodeY, radius, 0, Math.PI*2);
+      ctx.strokeStyle = `rgba(255,200,120,${ring*0.5})`;
+      ctx.lineWidth = 2 * ring;
+      ctx.stroke();
+    } else {
+      exploding = false;
+    }
+  }
+
+  // ── HUD ──────────────────────────────────────────────────
+  document.getElementById('stat-particles').textContent = N.toLocaleString() + ' particles';
+  document.getElementById('stat-fps').textContent       = fps + ' fps';
+  document.getElementById('stat-mode').textContent      = 'mode: ' + MODES[modeIdx];
+
+  t += 0.004;
+  requestAnimationFrame(animate);
+}
+
+animate();
+
+// ─────────────────────────────────────────────────────────────
+//  Input
+// ─────────────────────────────────────────────────────────────
+window.addEventListener('mousemove', e => {
+  mouse.px = mouse.x; mouse.py = mouse.y;
+  mouse.x  = e.clientX;
+  mouse.y  = e.clientY;
+});
+
+window.addEventListener('mouseleave', () => { mouse.x = -9999; mouse.y = -9999; });
+
+window.addEventListener('click', e => {
+  exploding = true;
+  explodeX  = e.clientX;
+  explodeY  = e.clientY;
+  explodeT  = 0;
+});
+
+window.addEventListener('keydown', e => {
+  if(e.code === 'Space'){
+    e.preventDefault();
+    modeIdx = (modeIdx+1) % MODES.length;
+  }
+  if(e.code === 'KeyP'){
+    paletteIdx = (paletteIdx+1) % PALETTES.length;
+  }
+  if(e.code === 'KeyR'){
+    particles.forEach(p => p.reset(true));
+  }
+});
+
+// Touch support
+window.addEventListener('touchmove', e => {
+  e.preventDefault();
+  mouse.x = e.touches[0].clientX;
+  mouse.y = e.touches[0].clientY;
+}, { passive: false });
+
+window.addEventListener('touchstart', e => {
+  const touch = e.touches[0];
+  exploding = true;
+  explodeX  = touch.clientX;
+  explodeY  = touch.clientY;
+  explodeT  = 0;
+});
+
+window.addEventListener('touchend', () => { mouse.x = -9999; mouse.y = -9999; });
+</script>
+</body>
+</html>
